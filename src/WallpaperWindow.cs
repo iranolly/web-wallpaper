@@ -412,6 +412,8 @@ internal sealed class WallpaperWindow : IDisposable
         }
     }
 
+    private long _lastDegradedLog;
+
     /// <summary>
     /// 问网页「插入点现在精确在哪」，换算成屏幕坐标。
     /// 输入法的候选框只能跟着窗口走，所以把隐形窗口摆到插入点上，
@@ -424,8 +426,7 @@ internal sealed class WallpaperWindow : IDisposable
         {
             // 量的是「插入点」而不是「输入框」：输入框里已经打了几个字，插入点就往右移几个字宽。
             // 输入法和普通软件里一样，靠这个点来决定组字窗和候选框画在哪。
-            // 量的是「插入点」而不是「输入框」，用镜像元素算：
-            // 换行、多行、滚动之后插入点在哪都能算对——这里最容易和原生体验差一截。
+            // 用镜像元素算：换行、多行、滚动之后插入点在哪都能算对——这里最容易和原生体验差一截。
             // 页面里可能有 iframe：那时顶层只看得见 iframe 本身，要逐层问进去，
             // 把内层的插入点加上外层的边框、内边距和缩放，才能得到顶层的坐标。
             const string js = """
@@ -440,12 +441,17 @@ function caretIn(win,doc){
     var ir=el.getBoundingClientRect();
     if(inner){
       var fs=win.getComputedStyle(el);
+      var tr=fs.transform||'none';
+      if(tr!=='none'){
+        var m=tr.replace(/^matrix\(|\)$/g,'').split(',').map(parseFloat);
+        if(m.length===6&&(Math.abs(m[1])>1e-4||Math.abs(m[2])>1e-4))return {x:ir.left,y:ir.top+ir.height/2,deg:1};
+      }
       var fbl=parseFloat(fs.borderLeftWidth)||0,fbt=parseFloat(fs.borderTopWidth)||0;
       var fpl=parseFloat(fs.paddingLeft)||0,fpt=parseFloat(fs.paddingTop)||0;
       var sx=el.offsetWidth?ir.width/el.offsetWidth:1,sy=el.offsetHeight?ir.height/el.offsetHeight:1;
       return {x:ir.left+(fbl+fpl+inner.x)*sx,y:ir.top+(fbt+fpt+inner.y)*sy};
     }
-    if(ir&&ir.width>0)return {x:ir.left,y:ir.top+ir.height/2};
+    if(ir&&ir.width>0)return {x:ir.left,y:ir.top+ir.height/2,deg:1};
     return null;
   }
   if(el===doc.body||el===doc.documentElement)return null;
@@ -483,18 +489,24 @@ function caretIn(win,doc){
   }catch(e){return null;}
 }
 var out=caretIn(window,document);
-return out?(out.x+','+out.y):'null';
+return out?(out.x+','+out.y+(out.deg?',1':'')):'null';
 }catch(e){return 'null';}})()
 """;
             var raw = await View.CoreWebView2.ExecuteScriptAsync(js);
             var text = raw.Trim('"');
             if (text == "null") return null;
             var parts = text.Split(',');
-            if (parts.Length != 2) return null;
+            if (parts.Length != 2 && parts.Length != 3) return null;
             if (!double.TryParse(parts[0], System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var cx)) return null;
             if (!double.TryParse(parts[1], System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var cy)) return null;
+            if (parts.Length == 3 && parts[2] == "1" &&
+                Environment.TickCount64 - _lastDegradedLog > 5000)
+            {
+                _lastDegradedLog = Environment.TickCount64;
+                Log.Write("[input] 内层插入点取不到（跨域、旋转或内层没焦点），候选框退回框架位置");
+            }
 
             double scale = CssScale;
             var origin = Form.PointToScreen(System.Drawing.Point.Empty);
