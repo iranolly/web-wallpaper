@@ -49,6 +49,8 @@ dotnet publish src/WebWallpaper.csproj -c Release -r win-x64 --self-contained fa
 
 首次运行会在程序目录生成 `config.json`，默认网址是本机 `http://127.0.0.1:18787/`，改掉它就能显示你的页面；托盘菜单里点「重新加载配置」立刻生效，不用重启。
 
+想先看效果，不用准备网站：`demo/index.html` 是一张自带的演示页，单文件、断网也能开。把 `DefaultUrl` 改成指向它的 `file://` 地址（例如 `file:///D:/web-wallpaper/demo/index.html`）再启动即可。
+
 ## 配置
 
 ```json

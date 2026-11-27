@@ -14,4 +14,5 @@ config.json.bak*
 
 # 工作记录、临时脚本、探测工程
 .pi/
+.serena/
 .test-injected
