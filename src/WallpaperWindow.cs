@@ -161,6 +161,7 @@ internal sealed class WallpaperWindow : IDisposable
     {
         if (_disposed) return;
         _chrome = IntPtr.Zero;
+        _frameWorlds.Clear();   // 新的文档 = 新的上下文，旧的一律作废
         if (_errorPage) return;
 
         if (e.IsSuccess)
@@ -413,6 +414,190 @@ internal sealed class WallpaperWindow : IDisposable
     }
 
     private long _lastDegradedLog;
+    private System.Drawing.Point _lastCdpPoint = new(-1, -1);
+    private readonly Dictionary<string, int> _frameWorlds = new();
+
+    /// <summary>
+    /// 从浏览器层面拿插入点：页面里的脚本被沙箱拦在外面时走这条路。
+    /// 先问每个框架“你里面有没有真正的输入焦点”，选最深的那一帧取插入点，
+    /// 再逐层加上它所在框架的位置与缩放——这些都不受同源限制，因为问的是浏览器本身。
+    /// 任何一步不成就返回 null，由调用方退回原来的保守位置。
+    /// </summary>
+    private async Task<System.Drawing.Point?> CaretViaBrowserAsync()
+    {
+        if (_disposed || View.CoreWebView2 == null) return null;
+        try
+        {
+            var treeRaw = await CdpAsync("Page.getFrameTree", "{}");
+            using var treeDoc = JsonDocument.Parse(treeRaw);
+            if (!treeDoc.RootElement.TryGetProperty("frameTree", out var root)) return null;
+
+            var frames = new List<(string Id, string? Parent, int Depth)>();
+            void Walk(JsonElement node, string? parent, int depth)
+            {
+                if (!node.TryGetProperty("frame", out var f)) return;
+                var id = f.GetProperty("id").GetString();
+                if (string.IsNullOrEmpty(id)) return;
+                frames.Add((id, parent, depth));
+                if (node.TryGetProperty("childFrames", out var kids) && kids.ValueKind == JsonValueKind.Array)
+                    foreach (var k in kids.EnumerateArray()) Walk(k, id, depth + 1);
+            }
+            Walk(root, null, 0);
+            if (frames.Count == 0) return null;
+
+            string? leaf = null;
+            int bestDepth = -1;
+            foreach (var fr in frames)
+            {
+                var ctx = await FrameWorldAsync(fr.Id);
+                if (ctx <= 0) continue;
+                var probe = await EvalAsync(ctx,
+                    "(()=>{const a=document.activeElement;if(!a)return '0';" +
+                    "const t=a.tagName||'';return (t==='INPUT'||t==='TEXTAREA'||a.isContentEditable===true)?'1':'0';})()");
+                if (probe == "1" && fr.Depth > bestDepth) { bestDepth = fr.Depth; leaf = fr.Id; }
+            }
+            if (leaf == null)
+            {
+                if (Environment.TickCount64 - _lastDegradedLog > 5000)
+                {
+                    _lastDegradedLog = Environment.TickCount64;
+                    Log.Write($"[cdp] 框架 {frames.Count} 个，都没有输入焦点");
+                }
+                return null;
+            }
+
+            var leafCtx = await FrameWorldAsync(leaf);
+            if (leafCtx <= 0) return null;
+            var caret = await EvalAsync(leafCtx, LeafCaretJs);
+            if (string.IsNullOrEmpty(caret) || caret == "null") { Log.Write("[cdp] 叶子帧取不到插入点：" + (caret ?? "null")); return null; }
+            var nums = caret.Split(',');
+            if (nums.Length < 2) return null;
+            if (!double.TryParse(nums[0], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var x)) return null;
+            if (!double.TryParse(nums[1], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var y)) return null;
+
+            var map = frames.ToDictionary(f => f.Id, f => f);
+            var cur = leaf;
+            for (int guard = 0; guard < 12 && map.TryGetValue(cur, out var fr); guard++)
+            {
+                if (fr.Parent == null) break;
+                var parentCtx = await FrameWorldAsync(fr.Parent);
+                if (parentCtx <= 0) return null;
+
+                var ownerRaw = await CdpAsync("DOM.getFrameOwner",
+                    "{\"frameId\":" + JsonSerializer.Serialize(cur) + "}");
+                using var ownerDoc = JsonDocument.Parse(ownerRaw);
+                if (!ownerDoc.RootElement.TryGetProperty("backendNodeId", out var backend)) { Log.Write("[cdp] getFrameOwner 无 backend：" + ownerRaw); return null; }
+
+                var resolved = await CdpAsync("DOM.resolveNode",
+                    "{\"backendNodeId\":" + backend.GetInt32() + ",\"executionContextId\":" + parentCtx + "}");
+                using var resolvedDoc = JsonDocument.Parse(resolved);
+                if (!resolvedDoc.RootElement.TryGetProperty("object", out var obj) ||
+                    !obj.TryGetProperty("objectId", out var objectId)) { Log.Write("[cdp] resolveNode 无 object：" + resolved); return null; }
+
+                var rectRaw = await CdpAsync("Runtime.callFunctionOn",
+                    "{\"objectId\":" + JsonSerializer.Serialize(objectId.GetString()) +
+                    ",\"returnByValue\":true,\"functionDeclaration\":" +
+                    JsonSerializer.Serialize(
+                        "function(){var r=this.getBoundingClientRect(),cs=getComputedStyle(this);" +
+                        "var bl=parseFloat(cs.borderLeftWidth)||0,bt=parseFloat(cs.borderTopWidth)||0;" +
+                        "var pl=parseFloat(cs.paddingLeft)||0,pt=parseFloat(cs.paddingTop)||0;" +
+                        "var sx=this.offsetWidth?r.width/this.offsetWidth:1,sy=this.offsetHeight?r.height/this.offsetHeight:1;" +
+                        "return [r.left+(bl+pl)*sx,r.top+(bt+pt)*sy,sx,sy];}") + "}");
+                using var rectDoc = JsonDocument.Parse(rectRaw);
+                if (!rectDoc.RootElement.TryGetProperty("result", out var rr) ||
+                    !rr.TryGetProperty("value", out var arr) || arr.ValueKind != JsonValueKind.Array) { Log.Write("[cdp] 取框架位置失败：" + rectRaw); return null; }
+                var box = arr.EnumerateArray().Select(v => v.GetDouble()).ToArray();
+                if (box.Length < 4) return null;
+
+                x = box[0] + x * box[2];
+                y = box[1] + y * box[3];
+                cur = fr.Parent;
+            }
+
+            var point = new System.Drawing.Point((int)Math.Round(x), (int)Math.Round(y));
+            if (point != _lastCdpPoint)
+            {
+                _lastCdpPoint = point;
+                Log.Write($"[cdp] 浏览器层面取到插入点 {point.X},{point.Y}（帧深 {bestDepth}）");
+            }
+            return point;
+        }
+        catch (Exception ex)
+        {
+            _frameWorlds.Clear();
+            Log.Write("[cdp] 取插入点失败：" + ex.Message);
+            return null;
+        }
+    }
+
+    private async Task<int> FrameWorldAsync(string frameId)
+    {
+        if (_frameWorlds.TryGetValue(frameId, out var cached)) return cached;
+        var raw = await CdpAsync("Page.createIsolatedWorld",
+            "{\"frameId\":" + JsonSerializer.Serialize(frameId) + ",\"worldName\":\"wpCaret\"}");
+        using var doc = JsonDocument.Parse(raw);
+        if (!doc.RootElement.TryGetProperty("executionContextId", out var id)) return -1;
+        var ctx = id.GetInt32();
+        _frameWorlds[frameId] = ctx;
+        return ctx;
+    }
+
+    private async Task<string?> EvalAsync(int contextId, string expression)
+    {
+        var raw = await CdpAsync("Runtime.evaluate",
+            "{\"expression\":" + JsonSerializer.Serialize(expression) +
+            ",\"contextId\":" + contextId + ",\"returnByValue\":true}");
+        using var doc = JsonDocument.Parse(raw);
+        if (doc.RootElement.TryGetProperty("exceptionDetails", out _)) return null;
+        if (!doc.RootElement.TryGetProperty("result", out var res)) return null;
+        return res.TryGetProperty("value", out var v) ? v.ToString() : null;
+    }
+
+    private async Task<string> CdpAsync(string method, string json)
+    {
+        if (View.CoreWebView2 == null) throw new InvalidOperationException("网页还没就绪");
+        return await View.CoreWebView2.CallDevToolsProtocolMethodAsync(method, json);
+    }
+
+    private const string LeafCaretJs = """
+(function(){try{
+var el=document.activeElement;if(!el)return 'null';
+if(el===document.body||el===document.documentElement)return 'null';
+var r=el.getBoundingClientRect();if(!r||r.width<=0||r.height<=0)return 'null';
+var cs=getComputedStyle(el);var tag=el.tagName;var x=r.left,y=r.top+r.height/2;
+if(tag==='INPUT'||tag==='TEXTAREA'){
+  var pos=el.selectionStart;if(pos===null||pos===undefined)pos=0;
+  var before=(el.value||'').substring(0,pos);
+  var m=document.createElement('div');
+  m.style.cssText='position:absolute;left:0;top:0;visibility:hidden;pointer-events:none;overflow:hidden;white-space:pre-wrap;word-wrap:break-word;';
+  m.style.font=cs.font;m.style.fontFamily=cs.fontFamily;m.style.fontSize=cs.fontSize;
+  m.style.fontWeight=cs.fontWeight;m.style.lineHeight=cs.lineHeight;m.style.letterSpacing=cs.letterSpacing;
+  m.style.paddingTop=cs.paddingTop;m.style.paddingLeft=cs.paddingLeft;
+  m.style.paddingRight=cs.paddingRight;m.style.paddingBottom=cs.paddingBottom;
+  m.style.borderTopWidth=cs.borderTopWidth;m.style.borderLeftWidth=cs.borderLeftWidth;
+  m.style.boxSizing=cs.boxSizing;m.style.width=el.clientWidth+'px';
+  m.textContent=before;
+  var mk=document.createElement('span');mk.textContent='\u200b';m.appendChild(mk);
+  document.body.appendChild(m);
+  var mr=mk.getBoundingClientRect(),mm=m.getBoundingClientRect();
+  document.body.removeChild(m);
+  var bL=parseFloat(cs.borderLeftWidth)||0,bT=parseFloat(cs.borderTopWidth)||0;
+  x=r.left+bL+(mr.left-mm.left)-(el.scrollLeft||0);
+  y=r.top+bT+(mr.top-mm.top)-(el.scrollTop||0)+mr.height/2;
+}else{
+  var sel=getSelection();
+  if(sel&&sel.rangeCount){
+    var rg=sel.getRangeAt(0).cloneRange();rg.collapse(false);
+    var rects=rg.getClientRects();var rr=rects.length?rects[rects.length-1]:rg.getBoundingClientRect();
+    if(rr&&(rr.width||rr.height)){x=rr.right;y=rr.top+rr.height/2;}
+  }
+}
+if(x<r.left-4)x=r.left;if(x>r.right+4)x=r.right;
+return x+','+y;
+}catch(e){return 'null';}})()
+""";
 
     /// <summary>
     /// 问网页「插入点现在精确在哪」，换算成屏幕坐标。
@@ -501,11 +686,20 @@ return out?(out.x+','+out.y+(out.deg?',1':'')):'null';
                     System.Globalization.CultureInfo.InvariantCulture, out var cx)) return null;
             if (!double.TryParse(parts[1], System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var cy)) return null;
-            if (parts.Length == 3 && parts[2] == "1" &&
-                Environment.TickCount64 - _lastDegradedLog > 5000)
+            if (parts.Length == 3 && parts[2] == "1")
             {
-                _lastDegradedLog = Environment.TickCount64;
-                Log.Write("[input] 内层插入点取不到（跨域、旋转或内层没焦点），候选框退回框架位置");
+                // 网页脚本被沙箱拦在外面，只能从浏览器层面逐层问进去
+                var deep = await CaretViaBrowserAsync();
+                if (deep.HasValue)
+                {
+                    cx = deep.Value.X;
+                    cy = deep.Value.Y;
+                }
+                else if (Environment.TickCount64 - _lastDegradedLog > 5000)
+                {
+                    _lastDegradedLog = Environment.TickCount64;
+                    Log.Write("[input] 内层插入点取不到（跨域、旋转或内层没焦点），候选框退回框架位置");
+                }
             }
 
             double scale = CssScale;
