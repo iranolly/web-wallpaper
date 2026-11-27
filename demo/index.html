@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>桌面 · 安静的一页</title>
+<style>
+  :root {
+    --ink: #e9e6df;
+    --dim: #8d8a83;
+    --line: rgba(255,255,255,.08);
+    --accent: #c8a06a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background:
+      radial-gradient(1200px 700px at 75% -10%, #1b1d22 0%, transparent 60%),
+      radial-gradient(900px 600px at 10% 110%, #191a1e 0%, transparent 55%),
+      #0e0f11;
+    color: var(--ink);
+    font: 15px/1.6 "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 48px;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { width: min(620px, 100%); }
+
+  .eyebrow {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 11px; letter-spacing: .22em; text-transform: uppercase;
+    color: var(--dim); margin-bottom: 26px;
+  }
+  .eyebrow::before {
+    content: ""; width: 26px; height: 1px; background: var(--accent); opacity: .8;
+  }
+
+  .clock {
+    font-size: clamp(64px, 9vw, 104px);
+    line-height: .95;
+    font-weight: 200;
+    letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums;
+    margin: 0 0 10px;
+  }
+  .clock span { color: var(--dim); font-size: .42em; letter-spacing: 0; margin-left: 8px; }
+
+  .date { color: var(--dim); font-size: 13px; letter-spacing: .06em; margin-bottom: 44px; }
+
+  form {
+    border-top: 1px solid var(--line);
+    padding-top: 22px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  label { font-size: 12px; letter-spacing: .16em; color: var(--dim); white-space: nowrap; }
+  input {
+    flex: 1; min-width: 0;
+    background: transparent; border: 0; outline: 0;
+    color: var(--ink); font: 17px/1.5 inherit;
+    padding: 8px 2px;
+    border-bottom: 1px solid var(--line);
+    transition: border-color .18s ease;
+  }
+  input::placeholder { color: #5f5d59; }
+  input:focus { border-bottom-color: var(--accent); }
+
+  .foot {
+    position: fixed; left: 0; right: 0; bottom: 30px;
+    text-align: center; font-size: 12px; color: #56544f;
+  }
+
+  ul {
+    list-style: none; padding: 0; margin: 42px 0 0;
+    display: flex; flex-wrap: wrap; gap: 10px;
+  }
+  li a {
+    display: block; padding: 7px 13px; border: 1px solid var(--line); border-radius: 999px;
+    color: var(--dim); text-decoration: none; font-size: 13px;
+    transition: color .18s, border-color .18s;
+  }
+  li a:hover { color: var(--ink); border-color: rgba(200,160,106,.5); }
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Desktop · 示例页</div>
+  <h1 class="clock" id="clock">--:--<span id="sec">00</span></h1>
+  <div class="date" id="date">&nbsp;</div>
+
+  <form autocomplete="off" onsubmit="return false">
+    <label for="note">随手记</label>
+    <input id="note" type="text" placeholder="" spellcheck="false">
+  </form>
+  <ul>
+    <li><a href="#" onclick="return false">日历</a></li>
+    <li><a href="#" onclick="return false">待办</a></li>
+    <li><a href="#" onclick="return false">天气</a></li>
+    <li><a href="#" onclick="return false">便签</a></li>
+  </ul>
+</main>
+<p class="foot">中文输入法的候选框会贴着光标出现</p>
+<script>
+  var days = ["周日","周一","周二","周三","周四","周五","周六"];
+  function tick() {
+    var d = new Date(), p = function (n) { return n < 10 ? "0" + n : "" + n; };
+    document.getElementById("clock").firstChild.nodeValue = p(d.getHours()) + ":" + p(d.getMinutes());
+    document.getElementById("sec").textContent = p(d.getSeconds());
+    document.getElementById("date").textContent =
+      d.getFullYear() + " 年 " + (d.getMonth() + 1) + " 月 " + d.getDate() + " 日 · " + days[d.getDay()];
+  }
+  tick(); setInterval(tick, 1000);
+</script>
+</body>
+</html>

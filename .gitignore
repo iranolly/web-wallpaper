@@ -1,0 +1,17 @@
+# 编译产物
+bin/
+obj/
+dist/
+runtimes/
+*.pdb
+*.user
+.vs/
+
+# 本机配置与日志（含真实地址，不进库）
+config.json
+config.json.bak*
+*.log
+
+# 工作记录、临时脚本、探测工程
+.pi/
+.test-injected

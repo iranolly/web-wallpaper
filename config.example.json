@@ -1,0 +1,12 @@
+{
+  "DefaultUrl": "https://example.com/",
+  "RightClickDesktopMenu": true,
+  "WheelScroll": true,
+  "ImeShiftToggle": true,
+  "KeyboardHook": true,
+  "NativeFocus": true,
+  "LiftWindow": true,
+  "Screens": [
+    { "Monitor": "\\\\.\\DISPLAY1", "Url": "", "Enabled": true, "Zoom": 1.0 }
+  ]
+}
