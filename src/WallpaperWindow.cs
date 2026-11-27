@@ -426,40 +426,64 @@ internal sealed class WallpaperWindow : IDisposable
             // 输入法和普通软件里一样，靠这个点来决定组字窗和候选框画在哪。
             // 量的是「插入点」而不是「输入框」，用镜像元素算：
             // 换行、多行、滚动之后插入点在哪都能算对——这里最容易和原生体验差一截。
+            // 页面里可能有 iframe：那时顶层只看得见 iframe 本身，要逐层问进去，
+            // 把内层的插入点加上外层的边框、内边距和缩放，才能得到顶层的坐标。
             const string js = """
 (function(){try{
-var el=document.activeElement;if(!el||el===document.body)return 'null';
-var r=el.getBoundingClientRect();if(!r||r.width<=0||r.height<=0)return 'null';
-var cs=getComputedStyle(el);var tag=el.tagName;var x=r.left,y=r.top+r.height/2;
-if(tag==='INPUT'||tag==='TEXTAREA'){
-  var pos=el.selectionStart;if(pos===null||pos===undefined)pos=0;
-  var before=(el.value||'').substring(0,pos);
-  var m=document.createElement('div');
-  m.style.cssText='position:absolute;left:0;top:0;visibility:hidden;pointer-events:none;overflow:hidden;white-space:pre-wrap;word-wrap:break-word;';
-  m.style.font=cs.font;m.style.fontFamily=cs.fontFamily;m.style.fontSize=cs.fontSize;
-  m.style.fontWeight=cs.fontWeight;m.style.lineHeight=cs.lineHeight;m.style.letterSpacing=cs.letterSpacing;
-  m.style.paddingTop=cs.paddingTop;m.style.paddingLeft=cs.paddingLeft;
-  m.style.paddingRight=cs.paddingRight;m.style.paddingBottom=cs.paddingBottom;
-  m.style.borderTopWidth=cs.borderTopWidth;m.style.borderLeftWidth=cs.borderLeftWidth;
-  m.style.boxSizing=cs.boxSizing;m.style.width=el.clientWidth+'px';
-  m.textContent=before;
-  var mk=document.createElement('span');mk.textContent='\u200b';m.appendChild(mk);
-  document.body.appendChild(m);
-  var mr=mk.getBoundingClientRect(),mm=m.getBoundingClientRect();
-  document.body.removeChild(m);
-  var bL=parseFloat(cs.borderLeftWidth)||0,bT=parseFloat(cs.borderTopWidth)||0;
-  x=r.left+bL+(mr.left-mm.left)-(el.scrollLeft||0);
-  y=r.top+bT+(mr.top-mm.top)-(el.scrollTop||0)+mr.height/2;
-}else{
-  var sel=window.getSelection();
-  if(sel&&sel.rangeCount){
-    var rg=sel.getRangeAt(0).cloneRange();rg.collapse(false);
-    var rects=rg.getClientRects();var rr=rects.length?rects[rects.length-1]:rg.getBoundingClientRect();
-    if(rr&&(rr.width||rr.height)){x=rr.right;y=rr.top+rr.height/2;}
+function caretIn(win,doc){
+  try{
+  var el=doc.activeElement;if(!el)return null;
+  var tag=el.tagName;
+  if(tag==='IFRAME'||tag==='FRAME'){
+    var inner=null;
+    try{if(el.contentWindow&&el.contentDocument)inner=caretIn(el.contentWindow,el.contentDocument);}catch(e){inner=null;}
+    var ir=el.getBoundingClientRect();
+    if(inner){
+      var fs=win.getComputedStyle(el);
+      var fbl=parseFloat(fs.borderLeftWidth)||0,fbt=parseFloat(fs.borderTopWidth)||0;
+      var fpl=parseFloat(fs.paddingLeft)||0,fpt=parseFloat(fs.paddingTop)||0;
+      var sx=el.offsetWidth?ir.width/el.offsetWidth:1,sy=el.offsetHeight?ir.height/el.offsetHeight:1;
+      return {x:ir.left+(fbl+fpl+inner.x)*sx,y:ir.top+(fbt+fpt+inner.y)*sy};
+    }
+    if(ir&&ir.width>0)return {x:ir.left,y:ir.top+ir.height/2};
+    return null;
   }
+  if(el===doc.body||el===doc.documentElement)return null;
+  var r=el.getBoundingClientRect();if(!r||r.width<=0||r.height<=0)return null;
+  var cs=win.getComputedStyle(el);var x=r.left,y=r.top+r.height/2;
+  if(tag==='INPUT'||tag==='TEXTAREA'){
+    var pos=el.selectionStart;if(pos===null||pos===undefined)pos=0;
+    var before=(el.value||'').substring(0,pos);
+    var m=doc.createElement('div');
+    m.style.cssText='position:absolute;left:0;top:0;visibility:hidden;pointer-events:none;overflow:hidden;white-space:pre-wrap;word-wrap:break-word;';
+    m.style.font=cs.font;m.style.fontFamily=cs.fontFamily;m.style.fontSize=cs.fontSize;
+    m.style.fontWeight=cs.fontWeight;m.style.lineHeight=cs.lineHeight;m.style.letterSpacing=cs.letterSpacing;
+    m.style.paddingTop=cs.paddingTop;m.style.paddingLeft=cs.paddingLeft;
+    m.style.paddingRight=cs.paddingRight;m.style.paddingBottom=cs.paddingBottom;
+    m.style.borderTopWidth=cs.borderTopWidth;m.style.borderLeftWidth=cs.borderLeftWidth;
+    m.style.boxSizing=cs.boxSizing;m.style.width=el.clientWidth+'px';
+    m.textContent=before;
+    var mk=doc.createElement('span');mk.textContent='\u200b';m.appendChild(mk);
+    doc.body.appendChild(m);
+    var mr=mk.getBoundingClientRect(),mm=m.getBoundingClientRect();
+    doc.body.removeChild(m);
+    var bL=parseFloat(cs.borderLeftWidth)||0,bT=parseFloat(cs.borderTopWidth)||0;
+    x=r.left+bL+(mr.left-mm.left)-(el.scrollLeft||0);
+    y=r.top+bT+(mr.top-mm.top)-(el.scrollTop||0)+mr.height/2;
+  }else{
+    var sel=win.getSelection();
+    if(sel&&sel.rangeCount){
+      var rg=sel.getRangeAt(0).cloneRange();rg.collapse(false);
+      var rects=rg.getClientRects();var rr=rects.length?rects[rects.length-1]:rg.getBoundingClientRect();
+      if(rr&&(rr.width||rr.height)){x=rr.right;y=rr.top+rr.height/2;}
+    }
+  }
+  if(x<r.left-4)x=r.left;if(x>r.right+4)x=r.right;
+  return {x:x,y:y};
+  }catch(e){return null;}
 }
-if(x<r.left-4)x=r.left;if(x>r.right+4)x=r.right;
-return x+','+y;
+var out=caretIn(window,document);
+return out?(out.x+','+out.y):'null';
 }catch(e){return 'null';}})()
 """;
             var raw = await View.CoreWebView2.ExecuteScriptAsync(js);
